@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv/
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# RAG data
+chroma_store/
+processed/
+data/
+None/
+# Local models
+*.gguf
+models/
+*.bin
+*.pth
+*.zip
+
+# Temporary files
+tmp/
+temp/
+.cache/
+
+# Node (future UI)
+node_modules/

@@ -1,0 +1,32 @@
+# Core
+fastapi
+uvicorn
+requests
+python-dotenv
+pydantic
+
+# Azure SDK
+azure-identity
+azure-search-documents
+
+# PyTorch
+torch
+torchvision
+
+# HuggingFace stack compatible with Artifactory and Python 3.10
+transformers==4.30.2
+tokenizers==0.13.3
+huggingface-hub==0.16.4
+
+# Sentence Transformers
+sentence-transformers==2.2.2
+
+# Extras
+scikit-learn
+scipy
+nltk
+chromadb
+streamlit
+plotly
+pandas
+psutil
