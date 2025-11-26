@@ -1,4 +1,7 @@
-from utils_rag import extract_llm_text
+from chromadb import PersistentClient
 
-sample = {"choices":[{"text":"Hello from GPT4All"}]}
-print(extract_llm_text(sample))
+client = PersistentClient(path="./chroma_store")
+coll = client.get_or_create_collection("aks_chunks")
+
+print("IDs:", coll.get()['ids'][:10])
+print("Count:", len(coll.get()['ids']))

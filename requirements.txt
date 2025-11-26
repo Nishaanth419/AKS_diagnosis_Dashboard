@@ -30,3 +30,4 @@ streamlit
 plotly
 pandas
 psutil
+reportlab

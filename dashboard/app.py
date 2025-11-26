@@ -1,81 +1,227 @@
-# app.py
-import os
-from fastapi import FastAPI
-from pydantic import BaseModel
-from azure.search.documents import SearchClient
-from azure.core.credentials import AzureKeyCredential
+# dashboard/app.py
+import streamlit as st
 import requests
 import json
-from sentence_transformers import SentenceTransformer
+import pandas as pd
+from pathlib import Path
+from db import init_db, save_history, load_history
 
-SEARCH_ENDPOINT = os.environ.get("AZURE_SEARCH_ENDPOINT")
-SEARCH_KEY = os.environ.get("AZURE_SEARCH_KEY")
-INDEX_NAME = os.environ.get("AZURE_SEARCH_INDEX", "aks-telemetry")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")  # example for Ollama REST
+API_URL = "http://localhost:8001"
 
-# local embed model for query vector (same family as indexing)
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "intfloat/e5-large")
-embed_model = SentenceTransformer(EMBED_MODEL)
+# ---------------------------------------------------------
+# Streamlit Setup
+# ---------------------------------------------------------
+st.set_page_config(page_title="AKS Logs & RAG Diagnosis", layout="wide")
+init_db()
 
-search_client = SearchClient(endpoint=SEARCH_ENDPOINT, index_name=INDEX_NAME, credential=AzureKeyCredential(SEARCH_KEY))
-app = FastAPI(title="AKS RAG Diagnose API")
+st.title("🚀 AKS Logs Browser & Troubleshooter (Local RAG)")
 
-class DiagnoseRequest(BaseModel):
-    cluster: str
-    namespace: str | None = None
-    pod: str | None = None
-    from_ts: str | None = None
-    to_ts: str | None = None
-    k: int = 6
 
-def embed_query(q: str):
-    vec = embed_model.encode(q)
-    return [float(x) for x in vec.tolist()]
+# ---------------------------------------------------------
+# Auto-refresh function
+# ---------------------------------------------------------
+def auto_refresh():
+    st.session_state["_refresh"] = True
+    st.rerun()
 
-def build_filter(req: DiagnoseRequest):
-    filters = [f"cluster eq '{req.cluster}'"]
-    if req.namespace:
-        filters.append(f"namespace eq '{req.namespace}'")
-    if req.pod:
-        filters.append(f"pod eq '{req.pod}'")
-    if req.from_ts:
-        filters.append(f"timestamp ge '{req.from_ts}'")
-    if req.to_ts:
-        filters.append(f"timestamp le '{req.to_ts}'")
-    return " and ".join(filters)
 
-@app.post("/diagnose")
-def diagnose(req: DiagnoseRequest):
-    qtext = "Diagnose Kubernetes failure: which pod/node/cluster is affected and why?"
-    qvec = embed_query(qtext)
-    filter_str = build_filter(req)
-    # vector query via Azure Cognitive Search
-    results = search_client.search(search_text="", filter=filter_str,
-                                   vector={"value": qvec, "fields": "vector", "k": req.k})
-    chunks = []
-    for r in results:
-        chunks.append({
-            "id": r["id"],
-            "cluster": r.get("cluster"),
-            "namespace": r.get("namespace"),
-            "pod": r.get("pod"),
-            "content": r.get("content")
-        })
-    evidence_text = "\n\n---\n\n".join([c["content"][:2000] for c in chunks[:req.k]])
-    prompt = f"""You are a Kubernetes incident analyst. Given the following evidence chunks, answer:
-1) Top 3 probable root causes (ranked with short explanation and confidence 0-1).
-2) For each cause provide 1-3 supporting evidence lines (quote).
-3) Suggested remediation steps and kubectl commands (safe first).
-4) Any follow-up checks to confirm the cause.
+# ---------------------------------------------------------
+# Sidebar Filters
+# ---------------------------------------------------------
+with st.sidebar:
+    st.header("🔍 Filters")
 
-Evidence:
-{evidence_text}
-"""
-    # call local LLM via Ollama or other local API
-    payload = {"model": "qwen2.5:7b-instruct", "prompt": prompt, "max_tokens": 800}
+    with st.expander("Basic Filters", expanded=True):
+        ns_filter = st.text_input(
+            "Namespace",
+            value=st.session_state.get("ns_filter", ""),
+            placeholder="e.g. kube-system",
+            on_change=auto_refresh,
+            key="ns_filter",
+        )
+
+        pod_filter = st.text_input(
+            "Pod Name",
+            value=st.session_state.get("pod_filter", ""),
+            placeholder="Search pod",
+            on_change=auto_refresh,
+            key="pod_filter",
+        )
+
+        reason_filter = st.text_input(
+            "Reason",
+            value=st.session_state.get("reason_filter", ""),
+            placeholder="Warning / FailedScheduling / BackOff",
+            on_change=auto_refresh,
+            key="reason_filter",
+        )
+
+    with st.expander("Advanced Query"):
+        search_text = st.text_input(
+            "Vector Search",
+            value=st.session_state.get("search_text", ""),
+            placeholder="Search log content using embeddings...",
+            on_change=auto_refresh,
+            key="search_text",
+        )
+
+    with st.expander("Sorting & Pagination"):
+        sort_by = st.selectbox(
+            "Sort By", ["start_ts", "namespace", "pod", "severity_hint", "id"],
+            key="sort_by",
+        )
+
+        order = st.radio("Order", ["desc", "asc"], key="order", horizontal=True)
+
+        limit = st.number_input(
+            "Page size", min_value=10, max_value=500, value=100, step=10, key="limit"
+        )
+
+    if st.button("🔄 Clear Filters"):
+        for k in ["ns_filter", "pod_filter", "reason_filter", "search_text"]:
+            st.session_state[k] = ""
+        st.rerun()
+
+
+# ---------------------------------------------------------
+# Fetch Logs
+# ---------------------------------------------------------
+def fetch_logs():
+    params = {
+        "namespace": st.session_state.get("ns_filter") or None,
+        "pod": st.session_state.get("pod_filter") or None,
+        "reason": st.session_state.get("reason_filter") or None,
+        "q": st.session_state.get("search_text") or None,
+        "sort_by": st.session_state.get("sort_by"),
+        "order": st.session_state.get("order"),
+        "limit": int(st.session_state.get("limit")),
+        "offset": 0,
+    }
+
     try:
-        llm_resp = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        llm_text = llm_resp.json().get("text") if llm_resp.status_code == 200 else llm_resp.text
+        resp = requests.get(
+            f"{API_URL}/logs",
+            params={k: v for k, v in params.items() if v is not None},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()
     except Exception as e:
-        llm_text = f"LLM call failed: {str(e)}"
-    return {"diagnosis": llm_text, "evidence_count": len(chunks), "evidence": chunks}
+        st.error(f"Failed to fetch logs: {e}")
+        return {"count": 0, "items": []}
+
+
+# ---------------------------------------------------------
+# Load logs
+# ---------------------------------------------------------
+logs_resp = fetch_logs()
+
+if logs_resp["count"] == 0:
+    st.warning("No logs found. Adjust filters or ensure backend is running.")
+    st.stop()
+
+items = logs_resp["items"]
+
+
+# ---------------------------------------------------------
+# Convert logs
+# ---------------------------------------------------------
+rows = []
+for it in items:
+    meta = it.get("metadata", {}) or {}
+    doc = it.get("document", "")
+    preview = (doc or "").replace("\n", " ")[:200]
+
+    rows.append({
+        "Select": False,
+        "id": it["id"],
+        "timestamp": meta.get("start_ts") or meta.get("timestamp", ""),
+        "namespace": meta.get("namespace", ""),
+        "message": preview,
+        "pod": meta.get("pod", ""),
+        "node": meta.get("node", ""),
+        "reason": meta.get("reason", ""),
+        "severity_hint": meta.get("severity_hint", ""),
+        "raw_doc": doc,
+        "full_meta": meta,
+    })
+
+
+# ---------------------------------------------------------
+# Display table
+# ---------------------------------------------------------
+st.subheader(f"📄 Logs ({logs_resp['count']}) — Select a row to diagnose")
+
+df = pd.DataFrame(rows)[[
+    "Select", "id", "timestamp", "namespace",
+    "message", "pod", "node", "reason", "severity_hint",
+]]
+
+table = st.data_editor(
+    df,
+    hide_index=True,
+    height=360,
+    width="stretch",
+    column_config={"Select": st.column_config.CheckboxColumn(required=False)},
+)
+
+selected_rows = table[table["Select"] == True]
+
+if selected_rows.empty:
+    st.info("☝ Select a log above to view details.")
+    st.stop()
+
+selected_id = selected_rows.iloc[0]["id"]
+selected_row = next(r for r in rows if r["id"] == selected_id)
+
+
+# ---------------------------------------------------------
+# Selected Log Details
+# ---------------------------------------------------------
+st.markdown("### 🧩 Selected Log")
+st.code(selected_row["raw_doc"])
+
+st.markdown("### Metadata")
+st.json(selected_row["full_meta"])
+
+
+# ---------------------------------------------------------
+# Diagnose
+# ---------------------------------------------------------
+if st.button("🔍 Diagnose Selected Log", width="stretch"):
+    with st.spinner("Running analysis…"):
+        try:
+            payload = {"chunk_id": selected_id}
+            resp = requests.post(f"{API_URL}/diagnose", json=payload, timeout=180)
+            resp.raise_for_status()
+            data = resp.json()
+
+            st.subheader("🧠 Diagnosis Result")
+            st.markdown(data.get("diagnosis", "No diagnosis returned."))
+
+            save_history(selected_id, data.get("diagnosis", ""))
+
+        except Exception as e:
+            st.error(f"Diagnosis failed: {e}")
+
+
+# ---------------------------------------------------------
+# Diagnosis History (NOW IN A DROPDOWN)
+# ---------------------------------------------------------
+st.markdown("---")
+
+with st.expander("📜 Show Diagnosis History", expanded=False):   # 🔥 NEW DROPDOWN
+    history = load_history()
+
+    if not history:
+        st.info("No previous diagnosis found.")
+    else:
+        for rec in history:
+            unique_key, chunk_id, diagnosis_text, _ = rec
+
+            st.markdown(f"**Log ID:** {chunk_id}")
+            st.code(
+                diagnosis_text[:1200]
+                + ("..." if len(diagnosis_text) > 1200 else "")
+            )
+            st.markdown("---")
