@@ -264,3 +264,71 @@ Analyze the following AKS logs:
         "evidence": evidence,
         "matched": len(evidence)
     }
+@app.post("/detailed")
+def detailed_review(req: dict):
+
+    chunk_id = req.get("chunk_id")
+    if not chunk_id:
+        raise HTTPException(status_code=400, detail="chunk_id required")
+
+    # Fetch same chunk
+    try:
+        got = collection.get(ids=[chunk_id], include=["ids", "documents", "metadatas"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Chroma get failed: {e}")
+
+    docs = got.get("documents", [])
+    metas = got.get("metadatas", [])
+    if not docs:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    doc = docs[0]
+    meta = metas[0] or {}
+
+    # Build evidence
+    evidence_text = f"""
+Raw Log:
+{doc}
+
+Metadata:
+{json.dumps(meta, indent=2)}
+"""
+
+    # Deep review prompt
+    deep_prompt = f"""
+You already provided a short diagnosis for this Kubernetes issue.
+
+The user wants DEEPER EXPLANATION.
+
+Provide a **highly detailed technical review** including:
+- Step-by-step explanation of what happened inside Kubernetes
+- Event progression and timeline
+- How controllers, scheduler, kubelet, API server handled this
+- Why the failure occurred
+- Hidden contributing factors
+- Expanded recommended fix with WHY each fix works
+- Long-term preventive measures
+- Deep SRE-style reasoning
+
+Make it very clear, structured, and technical.
+
+Evidence:
+{evidence_text}
+"""
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a senior Kubernetes SRE providing deep technical insight."},
+            {"role": "user", "content": deep_prompt}
+        ],
+        "temperature": 0.25,
+        "max_tokens": 1400
+    }
+
+    resp = requests.post(LLM_URL, json=payload, timeout=240)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=500, detail=resp.text)
+
+    output = extract_llm_text(resp.json())
+    return {"detailed_review": output}

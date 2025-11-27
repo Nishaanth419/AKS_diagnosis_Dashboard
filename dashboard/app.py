@@ -5,6 +5,13 @@ import json
 import pandas as pd
 from pathlib import Path
 from db import init_db, save_history, load_history
+import re
+
+def extract_reason(raw):
+    if not raw:
+        return ""
+    match = re.search(r"REASON=([A-Za-z0-9_-]+)", raw)
+    return match.group(1) if match else ""
 
 API_URL = "http://localhost:8001"
 
@@ -14,7 +21,92 @@ API_URL = "http://localhost:8001"
 st.set_page_config(page_title="AKS Logs & RAG Diagnosis", layout="wide")
 init_db()
 
-st.title("🚀 AKS Logs Browser & Troubleshooter (Local RAG)")
+st.title(" AKS Logs Browser & Diagnosis")
+
+# ---------------------------------------------------------
+# UI Styling (Azure + Soft Glassmorphism)
+# ---------------------------------------------------------
+st.markdown("""
+<style>
+
+body {
+    background-color: #f3f2f1 !important;
+    font-family: Segoe UI, sans-serif;
+}
+
+/* Global card */
+.azure-card {
+    background: #ffffff;
+    padding: 18px 22px;
+    border-radius: 8px;
+    border: 1px solid #e1e1e1;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    margin-bottom: 18px;
+}
+
+/* Section header */
+.azure-header {
+    font-size: 20px !important;
+    font-weight: 600 !important;
+    color: #0078D4;
+    margin-top: 15px;
+    margin-bottom: 10px;
+}
+
+/* Metadata box */
+.meta-box {
+    background: #fafafa;
+    border-left: 4px solid #0078D4;
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-top: 10px;
+}
+
+/* Diagnosis result box */
+.diag-box {
+    background: rgba(0, 0, 0, 0.55);
+    border-left: 4px solid #4aa3ff;
+    border-radius: 8px;
+    padding: 14px;
+    border: 1px solid rgba(255,255,255,0.08);
+    backdrop-filter: blur(6px) saturate(140%);
+    -webkit-backdrop-filter: blur(6px) saturate(140%);
+
+    /* Typography same as .section-header */
+    font-size: 20px !important;
+    font-weight: 600 !important;
+
+    /* But use WHITE text instead of blue */
+    color: #ffffff !important;
+
+    line-height: 1.4;
+}
+
+
+/* Buttons */
+.stButton>button {
+    background-color: #0078D4 !important;
+    color: white !important;
+    border-radius: 6px !important;
+    height: 42px;
+    border: none;
+    font-size: 15px;
+}
+
+.stButton>button:hover {
+    background-color: #005a9e !important;
+}
+
+/* Data editor header */
+[data-testid="stDataFrame"] th {
+    background-color: #f9f9f9 !important;
+    color: #333 !important;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
 
 
 # ---------------------------------------------------------
@@ -22,7 +114,7 @@ st.title("🚀 AKS Logs Browser & Troubleshooter (Local RAG)")
 # ---------------------------------------------------------
 def auto_refresh():
     st.session_state["_refresh"] = True
-    st.rerun()
+    
 
 
 # ---------------------------------------------------------
@@ -150,7 +242,7 @@ for it in items:
 # ---------------------------------------------------------
 # Display table
 # ---------------------------------------------------------
-st.subheader(f"📄 Logs ({logs_resp['count']}) — Select a row to diagnose")
+st.subheader(f"Logs ({logs_resp['count']}) — Select a row to diagnose")
 
 df = pd.DataFrame(rows)[[
     "Select", "id", "timestamp", "namespace",
@@ -168,7 +260,7 @@ table = st.data_editor(
 selected_rows = table[table["Select"] == True]
 
 if selected_rows.empty:
-    st.info("☝ Select a log above to view details.")
+    st.info("Select a log above to view details.")
     st.stop()
 
 selected_id = selected_rows.iloc[0]["id"]
@@ -178,7 +270,7 @@ selected_row = next(r for r in rows if r["id"] == selected_id)
 # ---------------------------------------------------------
 # Selected Log Details
 # ---------------------------------------------------------
-st.markdown("### 🧩 Selected Log")
+st.markdown("### Selected Log")
 st.code(selected_row["raw_doc"])
 
 st.markdown("### Metadata")
@@ -188,7 +280,7 @@ st.json(selected_row["full_meta"])
 # ---------------------------------------------------------
 # Diagnose
 # ---------------------------------------------------------
-if st.button("🔍 Diagnose Selected Log", width="stretch"):
+if st.button("Diagnose Selected Log", width="stretch"):
     with st.spinner("Running analysis…"):
         try:
             payload = {"chunk_id": selected_id}
@@ -196,7 +288,7 @@ if st.button("🔍 Diagnose Selected Log", width="stretch"):
             resp.raise_for_status()
             data = resp.json()
 
-            st.subheader("🧠 Diagnosis Result")
+            st.subheader("Diagnosis Result")
             st.markdown(data.get("diagnosis", "No diagnosis returned."))
 
             save_history(selected_id, data.get("diagnosis", ""))
@@ -210,7 +302,7 @@ if st.button("🔍 Diagnose Selected Log", width="stretch"):
 # ---------------------------------------------------------
 st.markdown("---")
 
-with st.expander("📜 Show Diagnosis History", expanded=False):   # 🔥 NEW DROPDOWN
+with st.expander("Show Diagnosis History", expanded=False):   # 🔥 NEW DROPDOWN
     history = load_history()
 
     if not history:
